@@ -12,5 +12,5 @@ COPY templates/ templates/
 # Expose the port the app runs on
 EXPOSE 5000
 
-# Command to run the app with the correct host binding
-CMD ["python", "-c", "import app; app.app.run(debug=True, host='0.0.0.0', port=5000)"]
+# Simple and direct command to run the app with proper host binding
+CMD ["python", "app.py"]
