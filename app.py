@@ -9,7 +9,14 @@ import urllib.request
 from urllib.parse import urlencode, unquote
 import re
 import time
+import requests
+import socket
 from datetime import datetime
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 CORS(app)
@@ -30,32 +37,57 @@ trackers_list = [
 
 # Base Torrent API class
 class BaseTorrentAPI:
-    def retrieve_url(self, url, request_data=None):
-        # Request data from API
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36'}
-        request = urllib.request.Request(url, request_data, headers)
-
+    def retrieve_url(self, url, request_data=None, timeout=10):
+        """Request data from API with improved error handling and timeouts"""
         try:
-            response = urllib.request.urlopen(request)
-        except urllib.error.HTTPError:
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36'}
+            
+            logger.info(f"Requesting URL: {url}")
+            
+            if request_data:
+                request = urllib.request.Request(url, request_data, headers)
+            else:
+                request = urllib.request.Request(url, None, headers)
+                
+            response = urllib.request.urlopen(request, timeout=timeout)
+            
+            # Capture the response data
+            data = response.read()
+            
+            # Check if gzip encoded
+            if data[:2] == b'\x1f\x8b':
+                with io.BytesIO(data) as stream, gzip.GzipFile(fileobj=stream) as gzipper:
+                    data = gzipper.read()
+
+            # Determine charset
+            charset = 'utf-8'
+            try:
+                content_type = response.getheader('Content-Type', '')
+                if 'charset=' in content_type:
+                    charset = content_type.split('charset=', 1)[1]
+            except IndexError:
+                pass
+
+            # Decode the data
+            dataStr = data.decode(charset, 'replace')
+            dataStr = dataStr.replace('"', '\\"')  # Escape quotes
+            dataStr = html.unescape(dataStr)
+            
+            logger.info(f"Successfully retrieved data from {url}")
+            return dataStr
+            
+        except urllib.error.HTTPError as e:
+            logger.error(f"HTTP Error {e.code} for {url}: {e.reason}")
             return ""
-
-        data = response.read()
-        if data[:2] == b'\x1f\x8b':
-            # Data is gzip encoded, decode it
-            with io.BytesIO(data) as stream, gzip.GzipFile(fileobj=stream) as gzipper:
-                data = gzipper.read()
-
-        charset = 'utf-8'
-        try:
-            charset = response.getheader('Content-Type', '').split('charset=', 1)[1]
-        except IndexError:
-            pass
-
-        dataStr = data.decode(charset, 'replace')
-        dataStr = dataStr.replace('"', '\\"')  # Manually escape " before
-        dataStr = html.unescape(dataStr)
-        return dataStr
+        except urllib.error.URLError as e:
+            logger.error(f"URL Error for {url}: {e.reason}")
+            return ""
+        except socket.timeout:
+            logger.error(f"Socket timeout for {url}")
+            return ""
+        except Exception as e:
+            logger.error(f"Error retrieving {url}: {str(e)}")
+            return ""
     
     def format_size(self, size_bytes):
         """Format bytes to human readable size"""
@@ -124,6 +156,7 @@ class PirateBayAPI(BaseTorrentAPI):
         try:
             response_json = json.loads(data)
         except:
+            logger.error(f"Failed to parse JSON from PirateBay API for query: {what}")
             return []
 
         # check empty response
@@ -190,12 +223,16 @@ class LimeTorrentsAPI(BaseTorrentAPI):
                 search_url = f"{self.url}/search/{what}/seeds/{page}/"
                 
             html = self.retrieve_url(search_url)
-            
+            if not html:
+                logger.warning(f"No HTML content returned from LimeTorrents for {search_url}")
+                continue
+                
             # Extract torrents using regex
             pattern = r'<div class="tt-name"><a href="([^"]+)"[^>]*>(.*?)</a>.*?<div class="tt-size"><span>(.*?)</span></div>.*?<div class="ttseed">(.*?)</div>.*?<div class="ttleech">(.*?)</div>'
             matches = re.findall(pattern, html, re.DOTALL)
             
             if not matches:
+                logger.info(f"No matches found on LimeTorrents page {page}")
                 break
                 
             for match in matches:
@@ -205,8 +242,13 @@ class LimeTorrentsAPI(BaseTorrentAPI):
                 details_url = self.url + link
                 details_html = self.retrieve_url(details_url)
                 
+                if not details_html:
+                    logger.warning(f"Couldn't get details page for {details_url}")
+                    continue
+                    
                 hash_match = re.search(r'([A-F0-9]{40})', details_html, re.IGNORECASE)
                 if not hash_match:
+                    logger.warning(f"No hash found for {details_url}")
                     continue
                     
                 torrent_hash = hash_match.group(1)
@@ -233,6 +275,7 @@ class LimeTorrentsAPI(BaseTorrentAPI):
                 
         return results
 
+# [Include all other API classes from your original code here...]
 class TorLockAPI(BaseTorrentAPI):
     url = 'https://www.torlock.com'
     name = 'TorLock'
@@ -302,7 +345,7 @@ class TorLockAPI(BaseTorrentAPI):
                     
                     results.append(result)
                 except Exception as e:
-                    print(f"Error parsing TorLock result: {e}")
+                    logger.error(f"Error parsing TorLock result: {e}")
                     continue
                     
         return results
@@ -321,6 +364,7 @@ class TorrentsCSVAPI(BaseTorrentAPI):
         try:
             response_json = json.loads(response)
         except:
+            logger.error(f"Failed to parse JSON from TorrentsCSV for query: {what}")
             return []
 
         # parse results
@@ -399,7 +443,7 @@ class EZTVAPI(BaseTorrentAPI):
                 
                 results.append(result)
             except Exception as e:
-                print(f"Error parsing EZTV result: {e}")
+                logger.error(f"Error parsing EZTV result: {e}")
                 continue
                 
         return results
@@ -464,7 +508,7 @@ class TorrentProjectAPI(BaseTorrentAPI):
                     
                     results.append(result)
                 except Exception as e:
-                    print(f"Error parsing TorrentProject result: {e}")
+                    logger.error(f"Error parsing TorrentProject result: {e}")
                     continue
                     
             if len(rows) < 20:  # If less than 20 results, don't check next page
@@ -539,7 +583,7 @@ class NyaaAPI(BaseTorrentAPI):
                     
                     results.append(result)
                 except Exception as e:
-                    print(f"Error parsing Nyaa result: {e}")
+                    logger.error(f"Error parsing Nyaa result: {e}")
                     continue
                     
             if len(rows) < 75:  # If less than 75 results, don't check next page
@@ -627,7 +671,7 @@ class X1337API(BaseTorrentAPI):
                     
                     results.append(result)
                 except Exception as e:
-                    print(f"Error parsing 1337x result: {e}")
+                    logger.error(f"Error parsing 1337x result: {e}")
                     continue
                     
             if len(rows) < 20:  # If less than 20 results, don't check next page
@@ -691,7 +735,7 @@ class MagnetDLAPI(BaseTorrentAPI):
                     
                     results.append(result)
                 except Exception as e:
-                    print(f"Error parsing MagnetDL result: {e}")
+                    logger.error(f"Error parsing MagnetDL result: {e}")
                     continue
                     
             if len(rows) < 20:  # If less than 20 results, don't check next page
@@ -766,7 +810,7 @@ class GloTorrentsAPI(BaseTorrentAPI):
                     
                     results.append(result)
                 except Exception as e:
-                    print(f"Error parsing GloTorrents result: {e}")
+                    logger.error(f"Error parsing GloTorrents result: {e}")
                     continue
                     
             if len(rows) < 20:  # If less than 20 results, don't check next page
@@ -805,23 +849,41 @@ def search():
             'glotorrents': GloTorrentsAPI()
         }
         
+        logger.info(f"Search request: query='{query}', category='{category}', site='{site}'")
+        
         # Search all sites or just the requested one
         if site == 'all':
             for api_name, api in apis.items():
                 try:
+                    logger.info(f"Searching {api_name}...")
                     site_results = api.search(query, category)
+                    logger.info(f"Found {len(site_results)} results from {api_name}")
                     results.extend(site_results)
                 except Exception as e:
-                    errors.append(f"Error searching {api_name}: {str(e)}")
+                    error_msg = f"Error searching {api_name}: {str(e)}"
+                    logger.error(error_msg)
+                    errors.append(error_msg)
         elif site in apis:
-            results = apis[site].search(query, category)
+            try:
+                results = apis[site].search(query, category)
+                logger.info(f"Found {len(results)} results from {site}")
+            except Exception as e:
+                error_msg = f"Error searching {site}: {str(e)}"
+                logger.error(error_msg)
+                errors.append(error_msg)
         
         # Sort results by seeders (descending)
         results = sorted(results, key=lambda x: int(x.get('seeds', 0)), reverse=True)
         
+        logger.info(f"Total results: {len(results)}")
+        if errors:
+            logger.warning(f"Errors encountered: {len(errors)}")
+            
         return jsonify(results)
     except Exception as e:
-        return jsonify({"error": str(e), "site_errors": errors}), 500
+        error_msg = f"Unexpected error: {str(e)}"
+        logger.error(error_msg)
+        return jsonify({"error": error_msg, "site_errors": errors}), 500
 
 @app.route('/api/sites')
 def get_sites():
@@ -855,6 +917,43 @@ def get_categories():
         {"id": "books", "name": "Books"}
     ]
     return jsonify(categories)
+
+@app.route('/test')
+def test_connection():
+    """Test if the API is running and can access torrent sites"""
+    results = {}
+    apis = {
+        'piratebay': PirateBayAPI(),
+        'limetorrents': LimeTorrentsAPI(),
+        'torlock': TorLockAPI(),
+        'torrentscsv': TorrentsCSVAPI(),
+        'eztv': EZTVAPI(),
+        'torrentproject': TorrentProjectAPI(),
+        'nyaa': NyaaAPI(),
+        '1337x': X1337API(),
+        'magnetdl': MagnetDLAPI(),
+        'glotorrents': GloTorrentsAPI()
+    }
+    
+    for name, api in apis.items():
+        try:
+            test_data = api.retrieve_url(api.url)
+            results[name] = {
+                "status": "OK" if test_data else "No data",
+                "url": api.url
+            }
+        except Exception as e:
+            results[name] = {
+                "status": "Error",
+                "error": str(e),
+                "url": api.url
+            }
+    
+    return jsonify({
+        "status": "API is running",
+        "server_ip": request.remote_addr,
+        "tests": results
+    })
 
 if __name__ == "__main__":
     app.run(debug=True, host='0.0.0.0', port=5000)
