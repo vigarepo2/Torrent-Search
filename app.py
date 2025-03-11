@@ -119,7 +119,6 @@ class PirateBayAPI(BaseTorrentAPI):
         params = {'q': what}
         if category != '0':
             params['cat'] = category
-
         # Calling custom `retrieve_url` function with adequate escaping
         data = self.retrieve_url(base_url % urlencode(params))
         try:
