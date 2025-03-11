@@ -607,12 +607,18 @@
                 showLoadingSkeletons();
                 
                 fetch(apiUrl)
-                    .then(response => response.json())
+                    .then(response => {
+                        if (!response.ok) {
+                            throw new Error('Network response was not ok');
+                        }
+                        return response.json();
+                    })
                     .then(data => {
                         loadingState.style.display = 'none';
                         
                         if (data.length === 0) {
                             emptyState.style.display = 'block';
+                            resultsContainer.style.display = 'none';
                             return;
                         }
                         
@@ -658,6 +664,8 @@
                     })
                     .catch(error => {
                         loadingState.style.display = 'none';
+                        emptyState.style.display = 'block';
+                        resultsContainer.style.display = 'none';
                         console.error('Error fetching results:', error);
                         alert('An error occurred while searching. Please try again later.');
                     });
